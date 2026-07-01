@@ -1,0 +1,139 @@
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import productsData from '../data/products.json';
+
+const BACKEND_URL = 'http://localhost:5000';
+const ShopContext = createContext();
+
+export const useShop = () => useContext(ShopContext);
+
+export const ShopProvider = ({ children }) => {
+  const [products, setProducts] = useState(productsData);
+  const [cart, setCart] = useState([]);
+  const [inventory, setInventory] = useState({});
+  const [backendOnline, setBackendOnline] = useState(false);
+
+  // Initialize inventory from local product data
+  useEffect(() => {
+    const localInventory = {};
+    productsData.forEach(p => {
+      localInventory[p.id] = p.stock_quantity ?? 999;
+    });
+    setInventory(localInventory);
+  }, []);
+
+  // Try to fetch live inventory from backend
+  const refreshInventory = useCallback(async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      
+      const res = await fetch(`${BACKEND_URL}/api/inventory`, { signal: controller.signal });
+      clearTimeout(timeout);
+      
+      if (res.ok) {
+        const data = await res.json();
+        const liveInventory = {};
+        data.inventory.forEach(p => {
+          liveInventory[p.id] = p.stock_quantity;
+        });
+        setInventory(liveInventory);
+        setBackendOnline(true);
+        return true;
+      }
+    } catch {
+      setBackendOnline(false);
+    }
+    return false;
+  }, []);
+
+  // Fetch inventory on mount
+  useEffect(() => {
+    refreshInventory();
+  }, [refreshInventory]);
+
+  const getStock = useCallback((productId) => {
+    return inventory[productId] ?? 0;
+  }, [inventory]);
+
+  const addToCart = (product) => {
+    const currentStock = getStock(product.id);
+    const inCartCount = cart.filter(item => item.id === product.id).length;
+    
+    if (inCartCount >= currentStock) {
+      return { success: false, message: `Only ${currentStock} unit(s) available for ${product.name}` };
+    }
+    
+    setCart((prev) => [...prev, product]);
+    return { success: true };
+  };
+
+  const removeFromCart = (indexToRemove) => {
+    setCart((prev) => prev.filter((_, idx) => idx !== indexToRemove));
+  };
+
+  const clearCart = () => {
+    setCart([]);
+  };
+
+  const getProductById = (id) => {
+    return products.find(p => p.id === id);
+  };
+
+  // Process checkout through backend
+  const processCheckout = async ({ email, deliveryMethod }) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, cart, deliveryMethod })
+      });
+
+      const data = await res.json();
+      
+      if (!res.ok) {
+        return { success: false, error: data.error, details: data.details };
+      }
+
+      // Update local inventory from backend response
+      if (data.updatedInventory) {
+        const newInventory = {};
+        data.updatedInventory.forEach(p => {
+          newInventory[p.id] = p.stock_quantity;
+        });
+        setInventory(newInventory);
+      }
+
+      return { 
+        success: true, 
+        orderId: data.orderId, 
+        message: data.message,
+        totalPrice: data.totalPrice 
+      };
+    } catch (err) {
+      // Backend offline — do local-only processing
+      return { 
+        success: false, 
+        error: 'Backend server is offline',
+        offline: true
+      };
+    }
+  };
+
+  return (
+    <ShopContext.Provider value={{
+      products,
+      cart,
+      inventory,
+      backendOnline,
+      addToCart,
+      removeFromCart,
+      clearCart,
+      getProductById,
+      getStock,
+      refreshInventory,
+      processCheckout
+    }}>
+      {children}
+    </ShopContext.Provider>
+  );
+};
